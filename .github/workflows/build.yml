@@ -1,0 +1,96 @@
+name: Build
+
+on:
+  repository_dispatch:
+    types: [build]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to build
+        required: true
+        type: string
+      branch:
+        description: Branch name
+        required: true
+        default: main
+        type: string
+      verbose:
+        description: Verbose logging
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: build-${{ github.event.client_payload.branch || inputs.branch }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ secrets.SOURCE_REPO }}
+          token: ${{ secrets.SOURCE_TOKEN }}
+          ref: ${{ github.event.client_payload.ref || inputs.ref }}
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          cache: pnpm
+
+      - uses: astral-sh/setup-uv@v10.1.0
+        with:
+          version: '0.11.25'
+
+      - name: Install
+        env:
+          BUILD_SCRIPT: ${{ secrets.BUILD_SCRIPT }}
+        run: bash "$BUILD_SCRIPT" --install-only
+
+      - name: Restore cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ secrets.CACHE_PATH }}
+          key: store-${{ github.run_id }}
+          restore-keys: store-
+
+      - name: Build
+        env:
+          BUILD_SCRIPT: ${{ secrets.BUILD_SCRIPT }}
+          JOB_SKIP_INSTALL: '1'
+          JOB_BRANCH: ${{ github.event.client_payload.branch || inputs.branch }}
+          JOB_REF: ${{ github.event.client_payload.ref || inputs.ref }}
+          JOB_VERBOSE: ${{ inputs.verbose && '1' || '' }}
+          OUTPUT_TOKEN: ${{ secrets.OUTPUT_TOKEN }}
+          OUTPUT_PUBLIC_REPO: ${{ secrets.OUTPUT_PUBLIC_REPO }}
+          OUTPUT_PRIVATE_REPO: ${{ secrets.OUTPUT_PRIVATE_REPO }}
+          SIGNING_P12: ${{ secrets.SIGNING_P12 }}
+          SIGNING_P12_PASSWORD: ${{ secrets.SIGNING_P12_PASSWORD }}
+          SIGNING_TSA_URL: ${{ secrets.SIGNING_TSA_URL }}
+          SITE_HOSTNAME: ${{ secrets.SITE_HOSTNAME }}
+        run: bash "$BUILD_SCRIPT"
+
+      - name: Save cache
+        if: always()
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ secrets.CACHE_PATH }}
+          key: store-${{ github.run_id }}
+
+      - name: Evict old caches
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEEP: store-${{ github.run_id }}
+        run: |
+          gh cache list --repo "$GITHUB_REPOSITORY" --key store- --limit 100 --json id,key |
+            jq -r --arg keep "$KEEP" '.[] | select(.key != $keep) | .id' |
+            xargs -r -n1 gh cache delete --repo "$GITHUB_REPOSITORY"
